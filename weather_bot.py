@@ -1,241 +1,266 @@
---- weather_bot.py (原始)
-
-
-+++ weather_bot.py (修改后)
-import telebot
+import os
+import time
+import math
+import logging
 import requests
-import datetime
+import telebot
+from datetime import datetime, timezone
 from telebot import types
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = '8833502523:AAE62skdOoe9ZvSEseYiHH9rxbbyPaK-iT0'
-API_KEY = '482adb12c18eaf2ee9c6a2dac8e6c7b3'
+API_KEY = os.getenv('WEATHER_API_KEY', '482adb12c18eaf2ee9c6a2dac8e6c7b3')
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '8833502523:AAE62skdOoe9ZvSEseYiHH9rxbbyPaK-iT0')
 
+# Логирование
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Инициализация бота
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Список городов для выбора
+# Города для выбора
 CITIES = {
-    'Москва': {'lat': 55.7558, 'lon': 37.6173},
-    'Санкт-Петербург': {'lat': 59.9343, 'lon': 30.3351},
-    'Казань': {'lat': 55.7961, 'lon': 49.1064},
-    'Новосибирск': {'lat': 55.0084, 'lon': 82.9357},
-    'Екатеринбург': {'lat': 56.8389, 'lon': 60.6057},
-    'Нижний Новгород': {'lat': 56.2965, 'lon': 43.9361},
-    'Сочи': {'lat': 43.6028, 'lon': 39.7342},
-    'Владивосток': {'lat': 43.1198, 'lon': 131.8869}
+    "Москва": {"lat": 55.75, "lon": 37.61},
+    "Санкт-Петербург": {"lat": 59.93, "lon": 30.33},
+    "Казань": {"lat": 55.79, "lon": 49.11},
+    "Новосибирск": {"lat": 55.00, "lon": 82.93},
+    "Екатеринбург": {"lat": 56.83, "lon": 60.60},
+    "Нижний Новгород": {"lat": 56.32, "lon": 44.00},
+    "Сочи": {"lat": 43.60, "lon": 39.73},
+    "Владивосток": {"lat": 43.11, "lon": 131.88}
 }
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def get_weather_data(lat, lon):
-    """Получает данные о погоде и прогнозе от OpenWeatherMap"""
-    urls = [
-        f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric&lang=ru",
-        f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={API_KEY}&units=metric&lang=ru"
-    ]
+    """Получает текущую погоду и прогноз"""
+    try:
+        # Текущая погода
+        current_url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric&lang=ru"
+        current_resp = requests.get(current_url, timeout=10)
+        current_resp.raise_for_status()
+        current_data = current_resp.json()
 
-    results = []
-    for url in urls:
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200:
-                results.append(response.json())
-            else:
-                return None, None
-        except Exception:
-            return None, None
+        # Прогноз
+        forecast_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={API_KEY}&units=metric&lang=ru"
+        forecast_resp = requests.get(forecast_url, timeout=10)
+        forecast_resp.raise_for_status()
+        forecast_data = forecast_resp.json()
 
-    if len(results) == 2:
-        return results[0], results[1]
-    return None, None
+        return current_data, forecast_data
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных погоды: {e}")
+        return None, None
 
-def get_moon_phase():
+def get_moon_phase(day=None):
     """Рассчитывает фазу луны"""
-    date = datetime.datetime.now()
-    year = date.year
-    month = date.month
-    day = date.day
-
+    if day is None:
+        day = datetime.now()
+    
+    # Алгоритм Конвея (упрощенный)
+    year = day.year
+    month = day.month
+    day_num = day.day
+    
     if month < 3:
         year -= 1
         month += 12
+    
+    c = 365.25 * year
+    e = 30.6 * month
+    jd = c + e + day_num - 694039.09  # Юлианская дата (упрощенно)
+    cycle = (jd % 29.5305882) / 29.5305882 * 8
+    
+    phase_name = ""
+    emoji = ""
+    
+    if cycle < 1:
+        phase_name = "🌑 Новолуние"
+        emoji = "🌑"
+    elif cycle < 2:
+        phase_name = "🌒 Растущая"
+        emoji = "🌒"
+    elif cycle < 3:
+        phase_name = "🌓 Первая четверть"
+        emoji = "🌓"
+    elif cycle < 4:
+        phase_name = "🌔 Растущая"
+        emoji = "🌔"
+    elif cycle < 5:
+        phase_name = "🌕 Полнолуние"
+        emoji = "🌕"
+    elif cycle < 6:
+        phase_name = "🌖 Убывающая"
+        emoji = "🌖"
+    elif cycle < 7:
+        phase_name = "🌗 Последняя четверть"
+        emoji = "🌗"
+    else:
+        phase_name = "🌘 Убывающая"
+        emoji = "🌘"
+        
+    return f"{emoji} {phase_name}"
 
-    a = int(year / 100)
-    b = int(a / 4)
-    c = 2 - a + b
-    e = int(365.25 * (year + 4716))
-    f = int(30.6001 * (month + 1))
-    jd = c + day + e + f - 1524.5
-    days_since_new = jd - 2451550.1
+def format_time(timestamp, tz_offset=None):
+    """Форматирует время с учетом часового пояса"""
+    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    # OpenWeatherMap возвращает время в UTC, но sunrise/sunset уже с учетом локации в timestamp
+    # Для отображения просто конвертируем в локальное время системы или добавляем смещение, если нужно
+    # В данном случае timestamp от API уже верный для города
+    return dt.strftime("%H:%M")
 
-    new_moons = int(days_since_new / 29.53)
-    moon_age = days_since_new - (new_moons * 29.53)
-
-    phase = round(moon_age / 29.53 * 8) % 8
-
-    phases = {
-        0: ("🌑", "Новолуние"),
-        1: ("🌒", "Растущая луна"),
-        2: ("🌓", "Первая четверть"),
-        3: ("🌔", "Растущая луна"),
-        4: ("🌕", "Полнолуние"),
-        5: ("🌖", "Убывающая луна"),
-        6: ("🌗", "Последняя четверть"),
-        7: ("🌘", "Убывающая луна")
-    }
-    return phases.get(phase, ("❓", "Неизвестно"))
-
-def format_time(timestamp, tz_offset):
-    """Форматирует Unix timestamp в строку времени с учетом часового пояса"""
-    dt = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone(datetime.timedelta(seconds=tz_offset)))
-    return dt.strftime('%H:%M')
-
-def build_current_message(city_name, data):
+def build_weather_message(city_name, current, forecast):
     """Формирует сообщение с текущей погодой и доп. данными"""
-    main = data['main']
-    weather = data['weather'][0]
-    wind = data['wind']
-    sys = data['sys']
-
-    temp = main['temp']
-    feels_like = main['feels_like']
-    humidity = main['humidity']
-    pressure_hpa = main['pressure']
-    pressure_mm = round(pressure_hpa * 0.75006)  # Конвертация в мм рт.ст.
-
-    desc = weather['description'].capitalize()
-
+    main = current['main']
+    weather_desc = current['weather'][0]['description']
+    icon = current['weather'][0]['icon']
+    wind = current['wind']['speed']
+    
+    # Давление (гПа -> мм рт.ст.)
+    pressure_hpa = main.get('pressure', 0)
+    pressure_mm = round(pressure_hpa * 0.75006)
+    
     # Восход и закат
-    sunrise_ts = sys.get('sunrise', 0)
-    sunset_ts = sys.get('sunset', 0)
-    timezone_offset = data.get('timezone', 0)
-
-    sunrise_str = format_time(sunrise_ts, timezone_offset)
-    sunset_str = format_time(sunset_ts, timezone_offset)
-
+    sys_data = current.get('sys', {})
+    sunrise_ts = sys_data.get('sunrise', 0)
+    sunset_ts = sys_data.get('sunset', 0)
+    sunrise_str = format_time(sunrise_ts)
+    sunset_str = format_time(sunset_ts)
+    
     # Луна
-    moon_icon, moon_text = get_moon_phase()
-
+    moon_phase = get_moon_phase()
+    
+    # Текст сообщения
     text = (
-        f"📍 <b>{city_name}</b>\n\n"
-        f"🌡 <b>{temp:.1f}°C</b> ({desc})\n"
-        f"💧 Ощущается как: {feels_like:.1f}°C\n"
-        f"💨 Ветер: {wind.get('speed', 0):.1f} м/с\n"
-        f"📉 Давление: {pressure_mm} мм рт.ст.\n"
-        f"💧 Влажность: {humidity}%\n\n"
+        f"🌍 <b>Погода: {city_name}</b>\n\n"
+        f"🌡️ <b>{main['temp']}°C</b> ({weather_desc.capitalize()})\n"
+        f"❄️ Ощущается как: {main.get('feels_like', 0)}°C\n"
+        f"💧 Влажность: {main.get('humidity', 0)}%\n"
+        f"💨 Ветер: {wind} м/с\n"
+        f"📉 Давление: {pressure_mm} мм рт. ст.\n\n"
         f"🌅 Восход: {sunrise_str}\n"
         f"🌇 Закат: {sunset_str}\n"
-        f"🌙 Луна: {moon_text} {moon_icon}"
+        f"{moon_phase}\n"
     )
-    return text
+    
+    # Клавиатура
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_forecast = types.InlineKeyboardButton("🕒 Прогноз на 24ч", callback_data=f"forecast_{city_name}")
+    btn_refresh = types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{city_name}")
+    markup.add(btn_forecast, btn_refresh)
+    
+    # Кнопки городов (для удобства возврата)
+    cities_markup = types.InlineKeyboardMarkup(row_width=4)
+    city_buttons = [types.InlineKeyboardButton(c, callback_data=f"city_{c}") for c in CITIES.keys()]
+    cities_markup.add(*city_buttons)
+    
+    return text, markup, cities_markup
 
-def build_hourly_message(forecast_data):
-    """Формирует сообщение с прогнозом по времени"""
+def build_forecast_message(city_name, forecast_data):
+    """Формирует сообщение с прогнозом"""
     if not forecast_data or 'list' not in forecast_
-        return "Нет данных для прогноза."
-
-    items = forecast_data['list'][:8]  # Берем первые 8 записей (на 24 часа при шаге 3ч)
-
-    lines = ["<b>🕒 Прогноз на 24 часа:</b>\n"]
-
+        return "❌ Не удалось получить прогноз."
+    
+    items = forecast_data['list'][:8]  # Берем первые 8 записей (24 часа с шагом 3ч)
+    text = f"🕒 <b>Прогноз на 24ч: {city_name}</b>\n_(Данные каждые 3 часа)_\n\n"
+    
     for item in items:
-        dt_txt = item['dt_txt']
-        time_str = dt_txt.split()[1][:5]  # Берем только время ЧЧ:ММ
+        dt = datetime.fromtimestamp(item['dt'])
+        time_str = dt.strftime("%d.%m %H:%M")
         temp = item['main']['temp']
         desc = item['weather'][0]['description']
-        pop = item.get('pop', 0) * 100  # Вероятность осадков
-
-        lines.append(f"{time_str} | {temp:.1f}°C | {desc.capitalize()} | 💧{pop:.0f}%")
-
-    lines.append("\n<i>*Данные предоставляются с шагом 3 часа (бесплатный тариф API)</i>")
-
-    return "\n".join(lines)
+        pop = item.get('pop', 0) * 100 # Вероятность осадков
+        
+        # Эмодзи осадков
+        rain_emoji = ""
+        if pop > 0:
+            rain_emoji = f" 🌧️{int(pop)}%"
+            
+        text += f"⏰ {time_str}: <b>{temp}°C</b>, {desc}{rain_emoji}\n"
+        
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 Назад к текущей", callback_data=f"refresh_{city_name}"))
+    return text, markup
 
 # --- ОБРАБОТЧИКИ БОТА ---
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [types.InlineKeyboardButton(city, callback_data=f"city:{city}") for city in CITIES.keys()]
+    buttons = [types.InlineKeyboardButton(city, callback_data=f"city_{city}") for city in CITIES.keys()]
     markup.add(*buttons)
-
     bot.send_message(
-        message.chat.id,
-        "Привет! Выберите город для получения прогноза погоды:",
+        message.chat.id, 
+        "👋 Привет! Выберите город для получения прогноза:", 
         reply_markup=markup
     )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('city:'))
-def handle_city_select(call):
-    city_name = call.data.split(':')[1]
-    coords = CITIES.get(city_name)
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    help_text = (
+        "🤖 <b>Бот погоды</b>\n\n"
+        "/start - Главное меню\n"
+        "/help - Эта справка\n\n"
+        "Используйте кнопки для выбора города."
+    )
+    bot.send_message(message.chat.id, help_text, parse_mode="HTML")
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('city_'))
+def handle_city_select(call):
+    city_name = call.data.replace('city_', '')
+    coords = CITIES.get(city_name)
+    
     if not coords:
         bot.answer_callback_query(call.id, "Город не найден", show_alert=True)
         return
 
     bot.answer_callback_query(call.id, f"Загружаю погоду для {city_name}...")
+    
+    # Отправляем индикатор загрузки (опционально можно удалить сообщение и отправить новое)
+    # Но лучше просто редактировать или отправлять новое
+    
+    current, forecast = get_weather_data(coords['lat'], coords['lon'])
+    
+    if current:
+        text, markup, cities_markup = build_weather_message(city_name, current, forecast)
+        # Сначала отправляем погоду
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="HTML")
+        # Затем предлагаем выбрать другой город (отдельным сообщением или можно добавить в клавиатуру выше, но так чище)
+        # bot.send_message(call.message.chat.id, "Выбрать другой город:", reply_markup=cities_markup) 
+        # Чтобы не спамить, оставим только основную клавиатуру с прогнозом
+    else:
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="❌ Ошибка получения данных.")
 
-    current_data, forecast_data = get_weather_data(coords['lat'], coords['lon'])
-
-    if not current_
-        bot.send_message(call.message.chat.id, "Ошибка получения данных. Попробуйте позже.")
-        return
-
-    # Отправляем основное сообщение с кнопками
-    markup = types.InlineKeyboardMarkup()
-    btn_refresh = types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh:{city_name}")
-    btn_hourly = types.InlineKeyboardButton("🕒 Прогноз на 24ч", callback_data=f"hourly:{city_name}")
-    markup.add(btn_refresh, btn_hourly)
-
-    msg_text = build_current_message(city_name, current_data)
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=msg_text,
-        reply_markup=markup,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('hourly:'))
-def handle_hourly_forecast(call):
-    city_name = call.data.split(':')[1]
+@bot.callback_query_handler(func=lambda call: call.data.startswith('forecast_'))
+def handle_forecast(call):
+    city_name = call.data.replace('forecast_', '')
     coords = CITIES.get(city_name)
-
+    
     if not coords:
+        bot.answer_callback_query(call.id, "Ошибка", show_alert=True)
         return
+        
+    bot.answer_callback_query(call.id, "Загрузка прогноза...")
+    
+    _, forecast = get_weather_data(coords['lat'], coords['lon'])
+    
+    if forecast:
+        text, markup = build_forecast_message(city_name, forecast)
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, reply_markup=markup, parse_mode="HTML")
+    else:
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="❌ Ошибка получения прогноза.")
 
-    _, forecast_data = get_weather_data(coords['lat'], coords['lon'])
-
-    if not forecast_
-        bot.answer_callback_query(call.id, "Ошибка загрузки прогноза", show_alert=True)
-        return
-
-    hourly_text = build_hourly_message(forecast_data)
-
-    # Возвращаем кнопку назад
-    markup = types.InlineKeyboardMarkup()
-    btn_back = types.InlineKeyboardButton("⬅️ Назад к текущей", callback_data=f"city:{city_name}")
-    markup.add(btn_back)
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=hourly_text,
-        reply_markup=markup,
-        parse_mode='HTML'
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('refresh:'))
+@bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
 def handle_refresh(call):
-    city_name = call.data.split(':')[1]
+    city_name = call.data.replace('refresh_', '')
+    # Имитируем выбор города заново
+    call.data = f"city_{city_name}"
     handle_city_select(call)
 
 # Запуск бота
 if __name__ == '__main__':
-    print("Бот запущен...")
+    logger.info("Бот запущен...")
     try:
-        bot.infinity_polling()
+        bot.infinity_polling(timeout=10, long_polling_timeout=5)
     except Exception as e:
-        print(f"Ошибка: {e}")
+        logger.error(f"Критическая ошибка: {e}")
