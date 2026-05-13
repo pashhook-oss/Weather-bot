@@ -1,0 +1,6 @@
+--- requirements.txt (原始)
+
+
++++ requirements.txt (修改后)
+python-telegram-bot==22.7
+requests>=2.31.0
