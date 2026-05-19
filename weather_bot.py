@@ -1,27 +1,23 @@
 import os
+import sys
 import time
 import math
-import threading
+import json
 import requests
 import telebot
-from telebot import types
 from datetime import datetime, timezone, timedelta
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
+USERS_FILE = 'users.json'
 
 if not BOT_TOKEN or not WEATHER_API_KEY:
     print("ОШИБКА: Не найдены переменные окружения TELEGRAM_BOT_TOKEN или WEATHER_API_KEY")
-    exit(1)
+    sys.exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Хранилище последнего выбранного города для каждого пользователя
-# Структура: { chat_id: "НазваниеГорода" }
-user_last_city = {}
-
-# Список городов с координатами
 CITIES = {
     "Москва": {"lat": 55.75, "lon": 37.61},
     "Санкт-Петербург": {"lat": 59.93, "lon": 30.33},
@@ -33,18 +29,14 @@ CITIES = {
     "Владивосток": {"lat": 43.11, "lon": 131.88}
 }
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ФУНКЦИИ ПОГОДЫ ---
 
 def get_weather_icon_code(icon_name):
     icons = {
-        "01d": "☀️", "01n": "🌙",
-        "02d": "⛅", "02n": "☁️",
-        "03d": "☁️", "03n": "☁️",
-        "04d": "☁️", "04n": "☁️",
-        "09d": "🌧️", "09n": "🌧️",
-        "10d": "🌦️", "10n": "🌧️",
-        "11d": "⛈️", "11n": "⛈️",
-        "13d": "❄️", "13n": "❄️",
+        "01d": "☀️", "01n": "🌙", "02d": "⛅", "02n": "☁️",
+        "03d": "☁️", "03n": "☁️", "04d": "☁️", "04n": "☁️",
+        "09d": "🌧️", "09n": "🌧️", "10d": "🌦️", "10n": "🌧️",
+        "11d": "⛈️", "11n": "⛈️", "13d": "❄️", "13n": "❄️",
         "50d": "🌫️", "50n": "🌫️"
     }
     return icons.get(icon_name, "🌡️")
@@ -69,23 +61,20 @@ def get_moon_phase():
 
 def format_time(timestamp, tz_offset):
     dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    offset_hours = int(tz_offset / 3600)
-    local_dt = dt + timedelta(hours=offset_hours)
+    from datetime import timedelta
+    local_dt = dt + timedelta(seconds=tz_offset)
     return local_dt.strftime("%H:%M")
 
-def get_weather_data(city_name):
-    """Возвращает текст прогноза и данные для отправки"""
+def get_city_weather(city_name):
+    if city_name not in CITIES:
+        return None
     coords = CITIES[city_name]
-    lat = coords['lat']
-    lon = coords['lon']
-    
-    url_current = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={coords['lat']}&lon={coords['lon']}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
     
     try:
-        resp = requests.get(url_current, timeout=10)
+        resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             return None
-            
         data = resp.json()
         
         temp = data['main']['temp']
@@ -102,225 +91,90 @@ def get_weather_data(city_name):
         sunset_ts = data['sys']['sunset']
         timezone_offset = data['timezone']
         
-        sunrise_str = format_time(sunrise_ts, timezone_offset)
-        sunset_str = format_time(sunset_ts, timezone_offset)
-        moon_phase = get_moon_phase()
-        
         text = (
-            f"☀️ <b>Доброе утро! Прогноз для {city_name}</b>\n\n"
+            f"☀️ <b>Доброе утро! Погода в {city_name}</b>\n\n"
             f"{emoji} <b>{desc.capitalize()}</b>\n"
-            f"🌡️ Температура: <b>{temp}°C</b> (ощущается как {feels_like}°C)\n"
+            f"🌡️ {temp}°C (ощущается как {feels_like}°C)\n"
             f"💨 Ветер: {wind_speed} м/с\n"
             f"💧 Влажность: {humidity}%\n"
-            f"📉 Давление: <b>{pressure_mm} мм рт. ст.</b>\n\n"
-            f"🌅 Восход: {sunrise_str}\n"
-            f"🌇 Закат: {sunset_str}\n"
-            f"🌙 Луна: {moon_phase}\n\n"
-            f"<i>Хорошего дня!</i>"
+            f"📉 Давление: {pressure_mm} мм рт. ст.\n\n"
+            f"🌅 Восход: {format_time(sunrise_ts, timezone_offset)}\n"
+            f"🌇 Закат: {format_time(sunset_ts, timezone_offset)}\n"
+            f"🌙 {get_moon_phase()}"
         )
         return text
     except Exception as e:
-        print(f"Error fetching weather: {e}")
+        print(f"Error fetching weather for {city_name}: {e}")
         return None
 
-# --- ПЛАНИРОВЩИК (ФОНОВЫЙ ПОТОК) ---
+# --- РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ---
 
-def morning_scheduler():
-    """Проверяет каждую минуту, не наступило ли 7:30"""
-    last_notification_minute = -1
-    
-    while True:
-        try:
-            now = datetime.now()
-            current_hour = now.hour
-            current_minute = now.minute
-            
-            # Проверяем время 07:30
-            # Чтобы не спамить каждую минуту в 7:30, запоминаем последнюю минуту отправки
-            if current_hour == 7 and current_minute == 30 and current_minute != last_notification_minute:
-                last_notification_minute = current_minute
-                
-                print(f"Время 07:30! Отправка уведомлений для {len(user_last_city)} пользователей.")
-                
-                for chat_id, city in user_last_city.items():
-                    if city in CITIES:
-                        weather_text = get_weather_data(city)
-                        if weather_text:
-                            try:
-                                bot.send_message(chat_id, weather_text, parse_mode='HTML')
-                                print(f"Отправлено пользователю {chat_id} ({city})")
-                            except Exception as e:
-                                print(f"Ошибка отправки пользователю {chat_id}: {e}")
-                                # Если бот заблокирован, можно удалить из списка (опционально)
-                                # user_last_city.pop(chat_id, None)
-            
-            # Сброс счетчика, если минута прошла (на случай если скрипт работал в 7:30 и перешел в 7:31)
-            if current_minute != 30:
-                last_notification_minute = -1
-                
-            time.sleep(60) # Ждем 1 минуту перед следующей проверкой
-            
-        except Exception as e:
-            print(f"Scheduler error: {e}")
-            time.sleep(60)
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {}
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+def save_user(user_id, city):
+    users = load_users()
+    users[str(user_id)] = city
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
 
-@bot.message_handler(commands=['start', 'help'])
+# --- ЛОГИКА БОТА (ДЛЯ РУЧНОГО ЗАПУСКА) ---
+
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for city in CITIES.keys():
         markup.add(city)
-    
-    welcome_text = (
-        "👋 Привет! Я бот прогноза погоды.\n\n"
-        "Выберите город из меню ниже или используйте команду:\n"
-        "/weather <город>\n\n"
-        "🔔 <b>Новое:</b> Теперь я буду присылать вам прогноз каждое утро в 07:30 автоматически для последнего выбранного города!"
-    )
-    bot.send_message(message.chat.id, welcome_text, reply_markup=markup)
+    bot.send_message(message.chat.id, 
+        "👋 Привет! Выберите город, чтобы я мог присылать вам утренний прогноз.\n"
+        "Также я сохраню ваш выбор для автоматической рассылки в 7:30.", 
+        reply_markup=markup)
 
 @bot.message_handler(func=lambda message: message.text in CITIES)
-def handle_city_selection(message):
-    city_name = message.text
-    # Сохраняем выбор пользователя
-    user_last_city[message.chat.id] = city_name
-    send_weather(message.chat.id, city_name)
+def handle_city(message):
+    city = message.text
+    save_user(message.chat.id, city)
+    weather_text = get_city_weather(city)
+    if weather_text:
+        bot.send_message(message.chat.id, weather_text, parse_mode='HTML')
+        bot.send_message(message.chat.id, "✅ Город сохранен! Теперь вы будете получать прогноз каждое утро в 7:30.")
+    else:
+        bot.send_message(message.chat.id, "Ошибка получения погоды, но город сохранен.")
 
-@bot.message_handler(commands=['weather'])
-def handle_weather_command(message):
-    try:
-        city_name = message.text.split(maxsplit=1)[1].strip().capitalize()
-        found_city = None
-        for key in CITIES.keys():
-            if key.lower() == city_name.lower():
-                found_city = key
-                break
-        
-        if found_city:
-            user_last_city[message.chat.id] = found_city
-            send_weather(message.chat.id, found_city)
+# --- РЕЖИМ РАССЫЛКИ (ДЛЯ GITHUB ACTIONS) ---
+
+def run_morning_broadcast():
+    print("Запуск утренней рассылки...")
+    users = load_users()
+    if not users:
+        print("Нет пользователей для рассылки.")
+        return
+
+    success_count = 0
+    for user_id_str, city in users.items():
+        user_id = int(user_id_str)
+        text = get_city_weather(city)
+        if text:
+            try:
+                bot.send_message(user_id, text, parse_mode='HTML')
+                success_count += 1
+                print(f"Отправлено пользователю {user_id} ({city})")
+            except Exception as e:
+                print(f"Ошибка отправки пользователю {user_id}: {e}")
         else:
-            bot.reply_to(message, f"Город '{city_name}' не найден. Выберите из меню.")
-    except IndexError:
-        bot.reply_to(message, "Пожалуйста, укажите город. Пример: /weather Москва")
-
-def send_weather(chat_id, city_name):
-    coords = CITIES[city_name]
-    lat = coords['lat']
-    lon = coords['lon']
+            print(f"Не удалось получить погоду для {city}")
     
-    url_current = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-    url_forecast = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-    
-    try:
-        resp_curr = requests.get(url_current, timeout=10)
-        resp_fore = requests.get(url_forecast, timeout=10)
-        
-        if resp_curr.status_code != 200:
-            bot.send_message(chat_id, "Ошибка получения данных.")
-            return
-            
-        data_curr = resp_curr.json()
-        data_fore = resp_fore.json()
-        
-        temp = data_curr['main']['temp']
-        feels_like = data_curr['main']['feels_like']
-        pressure_hpa = data_curr['main']['pressure']
-        pressure_mm = round(pressure_hpa * 0.75006)
-        humidity = data_curr['main']['humidity']
-        wind_speed = data_curr['wind']['speed']
-        desc = data_curr['weather'][0]['description']
-        icon = data_curr['weather'][0]['icon']
-        emoji = get_weather_icon_code(icon)
-        
-        sunrise_ts = data_curr['sys']['sunrise']
-        sunset_ts = data_curr['sys']['sunset']
-        timezone_offset = data_curr['timezone']
-        
-        sunrise_str = format_time(sunrise_ts, timezone_offset)
-        sunset_str = format_time(sunset_ts, timezone_offset)
-        moon_phase = get_moon_phase()
-        
-        text = (
-            f"📍 <b>{city_name}</b>\n"
-            f"{emoji} <b>{desc.capitalize()}</b>\n\n"
-            f"🌡️ Температура: <b>{temp}°C</b> (ощущается как {feels_like}°C)\n"
-            f"💨 Ветер: {wind_speed} м/с\n"
-            f"💧 Влажность: {humidity}%\n"
-            f"📉 Давление: <b>{pressure_mm} мм рт. ст.</b>\n\n"
-            f"🌅 Восход: {sunrise_str}\n"
-            f"🌇 Закат: {sunset_str}\n"
-            f"🌙 Луна: {moon_phase}"
-        )
-        
-        markup = types.InlineKeyboardMarkup()
-        btn_forecast = types.InlineKeyboardButton("🕒 Прогноз на 24ч", callback_data=f"forecast_{city_name}")
-        btn_refresh = types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{city_name}")
-        markup.add(btn_forecast, btn_refresh)
-        
-        bot.send_message(chat_id, text, parse_mode='HTML', reply_markup=markup)
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        bot.send_message(chat_id, "Произошла ошибка.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('forecast_'))
-def handle_forecast_callback(call):
-    city_name = call.data.split('_')[1]
-    coords = CITIES[city_name]
-    
-    url = f"https://api.openweathermap.org/data/2.5/forecast?lat={coords['lat']}&lon={coords['lon']}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-    
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            bot.answer_callback_query(call.id, "Ошибка загрузки прогноза", show_alert=True)
-            return
-            
-        data = resp.json()
-        forecast_list = data.get('list', [])
-        
-        if not forecast_list:
-            bot.answer_callback_query(call.id, "Нет данных прогноза", show_alert=True)
-            return
-        
-        msg_text = f"🕒 <b>Прогноз на 24 часа ({city_name})</b>\n<i>(Данные каждые 3 часа)</i>\n\n"
-        
-        for item in forecast_list[:8]:
-            dt_txt = item['dt_txt']
-            time_str = dt_txt.split()[1][:5] 
-            temp = item['main']['temp']
-            desc = item['weather'][0]['description']
-            pop = item.get('pop', 0) * 100
-            
-            icon = item['weather'][0]['icon']
-            emoji = get_weather_icon_code(icon)
-            
-            msg_text += f"⏰ <b>{time_str}</b>: {temp}°C {emoji}\n"
-            msg_text += f"   {desc.capitalize()}, осадки: {int(pop)}%\n\n"
-            
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=msg_text, parse_mode='HTML')
-        bot.answer_callback_query(call.id)
-        
-    except Exception as e:
-        print(f"Forecast Error: {e}")
-        bot.answer_callback_query(call.id, "Ошибка", show_alert=True)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
-def handle_refresh_callback(call):
-    city_name = call.data.split('_')[1]
-    user_last_city[call.message.chat.id] = city_name # Обновляем последний город при ручном обновлении
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    send_weather(call.message.chat.id, city_name)
-
-# --- ЗАПУСК ---
+    print(f"Рассылка завершена. Успешно: {success_count}/{len(users)}")
 
 if __name__ == '__main__':
-    print("Запуск планировщика утренних уведомлений...")
-    # Запускаем планировщик в отдельном потоке, чтобы он не блокировал работу бота
-    scheduler_thread = threading.Thread(target=morning_scheduler, daemon=True)
-    scheduler_thread.start()
-    
-    print("Запуск бота...")
-    bot.infinity_polling()
+    if len(sys.argv) > 1 and sys.argv[1] == '--send-morning':
+        run_morning_broadcast()
+    else:
+        print("Запуск бота в режиме ожидания команд...")
+        bot.infinity_polling()
