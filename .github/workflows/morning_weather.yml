@@ -1,34 +1,5 @@
-name: Morning Weather Broadcast
-
-on:
-  schedule:
-    # Запуск каждый день в 4:30 UTC (это 7:30 MSK)
-    # Формат: Минута Час День Месяц ДеньНедели
-    - cron: '30 4 * * *'
-  
-  # Возможность запустить вручную через вкладку Actions в GitHub (для тестов)
-  workflow_dispatch:
-
-jobs:
-  send-weather:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyTelegramBotAPI requests
-
       - name: Run morning broadcast
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+          # WEATHER_API_KEY удален
         run: python weather_bot.py --send-morning
