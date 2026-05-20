@@ -3,6 +3,7 @@ import sys
 import json
 import requests
 import telebot
+import math
 from datetime import datetime, timezone, timedelta
 
 # --- КОНФИГУРАЦИЯ ---
@@ -14,7 +15,6 @@ if not BOT_TOKEN or not WEATHER_API_KEY:
     print("❌ ОШИБКА: Не найдены переменные окружения TELEGRAM_BOT_TOKEN или WEATHER_API_KEY")
     sys.exit(1)
 
-# Инициализация бота без лишних параметров
 bot = telebot.TeleBot(BOT_TOKEN)
 
 CITIES = {
@@ -41,22 +41,48 @@ def get_weather_icon_code(icon_name):
     return icons.get(icon_name, "🌡️")
 
 def get_moon_phase():
-    known_new_moon = datetime(2001, 1, 1, 12, 24, 0, tzinfo=timezone.utc)
-    synodic_month = 29.53058867
+    """
+    Точный расчет фазы луны на основе юлианской даты.
+    Возвращает эмодзи и название фазы.
+    """
     now = datetime.now(timezone.utc)
-    diff_days = (now - known_new_moon).total_seconds() / 86400
-    cycles = diff_days / synodic_month
-    current_cycle_pos = cycles - int(cycles)
-    age = current_cycle_pos * synodic_month
+    year = now.year
+    month = now.month
+    day = now.day
+
+    # Алгоритм расчета фазы (Conway's method / астрономический расчет)
+    if month < 3:
+        year -= 1
+        month += 12
     
-    if age < 1: return "🌑 Новолуние"
-    elif age < 7: return "🌒 Растущая"
-    elif age < 8: return "🌓 Первая четверть"
-    elif age < 14: return "🌔 Растущая"
-    elif age < 15: return "🌕 Полнолуние"
-    elif age < 21: return "🌖 Убывающая"
-    elif age < 22: return "🌗 Последняя четверть"
-    else: return "🌘 Убывающая"
+    c = 365.25 * year
+    e = 30.6 * month
+    jd = c + e + day - 694039.09  # Юлианская дата
+    jd /= 29.5305882  # Синодический месяц
+    
+    n = int(jd)
+    jd -= n  # Возраст луны в долях цикла (от 0 до 1)
+    
+    # Определяем фазу в зависимости от возраста (0.0 - Новолуние, 0.5 - Полнолуние)
+    # Разбиваем цикл на 8 секторов по 0.125
+    phase_map = [
+        (0.03, "🌑 Новолуние"),
+        (0.12, "🌒 Растущая"),
+        (0.16, "🌓 Первая четверть"),
+        (0.35, "🌔 Растущая"),
+        (0.53, "🌕 Полнолуние"),
+        (0.62, "🌖 Убывающая"),
+        (0.66, "🌗 Последняя четверть"),
+        (1.0, "🌘 Убывающая")
+    ]
+    
+    result_phase = "🌑 Новолуние"
+    for threshold, name in phase_map:
+        if jd <= threshold:
+            result_phase = name
+            break
+            
+    return result_phase
 
 def format_time(timestamp, tz_offset):
     dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -68,13 +94,13 @@ def get_city_weather(city_name):
         return None
     coords = CITIES[city_name]
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={coords['lat']}&lon={coords['lon']}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-    
+
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             return None
         data = resp.json()
-        
+
         temp = data['main']['temp']
         feels_like = data['main']['feels_like']
         pressure_hpa = data['main']['pressure']
@@ -84,11 +110,11 @@ def get_city_weather(city_name):
         desc = data['weather'][0]['description']
         icon = data['weather'][0]['icon']
         emoji = get_weather_icon_code(icon)
-        
+
         sunrise_ts = data['sys']['sunrise']
         sunset_ts = data['sys']['sunset']
         timezone_offset = data['timezone']
-        
+
         text = (
             f"☀️ <b>Доброе утро! Погода в {city_name}</b>\n\n"
             f"{emoji} <b>{desc.capitalize()}</b>\n"
@@ -130,12 +156,12 @@ def save_user(user_id, city):
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     for city in CITIES.keys():
         markup.add(city)
-    bot.send_message(message.chat.id, 
+    bot.send_message(message.chat.id,
         "👋 Привет! Выберите город, чтобы я мог присылать вам утренний прогноз.\n"
-        "Также я сохраню ваш выбор для автоматической рассылки в 7:30.", 
+        "Также я сохраню ваш выбор для автоматической рассылки в 7:30.",
         reply_markup=markup)
 
 @bot.message_handler(func=lambda message: message.text in CITIES)
@@ -149,7 +175,7 @@ def handle_city(message):
     else:
         bot.send_message(message.chat.id, "Ошибка получения погоды, но город сохранен.")
 
-# --- РЕЖИМ РАССЫЛКИ (GITHUB ACTIONS) ---
+# --- РЕЖИМ РАССЫЛКИ ---
 
 def run_morning_broadcast():
     print("🚀 Запуск утренней рассылки...")
@@ -171,13 +197,10 @@ def run_morning_broadcast():
                 print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
         else:
             print(f"⚠️ Не удалось получить погоду для {city}")
-    
+
     print(f"🏁 Рассылка завершена. Успешно: {success_count}/{len(users)}")
 
 if __name__ == '__main__':
-    # Импорт нужен только здесь, чтобы не ломать скрипт рассылки, если телебот не нужен для кнопок в_actions
-    from telebot import types 
-    
     if len(sys.argv) > 1 and sys.argv[1] == '--send-morning':
         run_morning_broadcast()
     else:
