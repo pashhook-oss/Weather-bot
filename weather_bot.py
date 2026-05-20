@@ -3,21 +3,24 @@ import sys
 import json
 import requests
 import io
-from datetime import datetime, timezone, timedelta
 import telebot
+from datetime import datetime, timezone, timedelta
 from telebot import types
 
-# Проверка наличия matplotlib (может отсутствовать в легковесных средах)
+# Проверка наличия библиотек для графиков
 try:
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
     from matplotlib.font_manager import FontProperties
-    # Настройка стиля для темной темы (опционально)
-    plt.style.use('seaborn-v0_8-darkgrid') 
+    # Попытка загрузить шрифт, поддерживающий кириллицу (стандартный для Linux серверов часто DejaVu)
+    # Если шрифт не найден, matplotlib использует стандартный, но кириллица может не отобразиться.
+    # Для Render лучше явно указать путь или использовать стандартный sans-serif, заменив подписи на латиницу если нужно.
+    # В данном коде мы используем стандартный шрифт, но для кириллицы на графике может потребоваться установка шрифтов в Docker/Render.
+    # Альтернатива: использовать только цифры и эмодзи на графике.
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
-    print("⚠️ Warning: Matplotlib not found. Graphs will be disabled.")
+    print("Warning: matplotlib not found. Graphs will be disabled.")
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -27,7 +30,7 @@ if not BOT_TOKEN:
     print("❌ ОШИБКА: Не найдена переменная окружения TELEGRAM_BOT_TOKEN")
     sys.exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, none_mode=True) # none_mode ускоряет обработку, если не используется polling в классическом виде, но для infinity_polling он ок
 
 CITIES = {
     "Москва": {"lat": 55.75, "lon": 37.61},
@@ -121,7 +124,11 @@ def get_city_weather_data(city_name, forecast_hours=24):
         visibility_m = curr.get('visibility')
         visibility_km = round(visibility_m / 1000) if visibility_m else "N/A"
         cloud_cover = curr.get('cloud_cover')
+        
         weather_code = curr.get('weather_code', 0)
+        desc = get_weather_description(weather_code)
+        emoji = get_weather_emoji(weather_code)
+        tz_offset_str = data.get('timezone_abbreviation', 'UTC')
         
         # Прогноз
         hourly = data.get('hourly', {})
@@ -143,8 +150,7 @@ def get_city_weather_data(city_name, forecast_hours=24):
         count = 0
         for i in range(start_index, len(time_list)):
             if count >= 24: break
-            t_str = time_list[i].split('T')[1][:5]
-            
+            t_str = time_list[i].split('T')[1][:5] 
             forecast_data.append({
                 "time": t_str,
                 "temp": temp_list[i],
@@ -158,11 +164,11 @@ def get_city_weather_data(city_name, forecast_hours=24):
         return {
             "city": city_name,
             "coords": f"{lat}, {lon}",
-            "tz": data.get('timezone_abbreviation', 'UTC'),
+            "tz": tz_offset_str,
             "temp": current_temp,
             "feels_like": feels_like,
-            "desc": get_weather_description(weather_code),
-            "emoji": get_weather_emoji(weather_code),
+            "desc": desc,
+            "emoji": emoji,
             "humidity": humidity,
             "pressure_mm": pressure_mm,
             "wind": wind_speed,
@@ -175,9 +181,10 @@ def get_city_weather_data(city_name, forecast_hours=24):
         print(f"Error fetching Open-Meteo: {e}")
         return None
 
-def format_current_message(data):
+def format_current_message(data, updated=False):
+    update_mark = " 🔄" if updated else ""
     text = (
-        f"📍 <b>{data['city']}</b> ({data['coords']})\n"
+        f"📍 <b>{data['city']}</b> ({data['coords']}){update_mark}\n"
         f"🕒 Часовой пояс: {data['tz']}\n\n"
         f"{data['emoji']} <b>{data['desc']}</b>\n\n"
         f"🌡️ Температура: <b>{data['temp']}°C</b> (ощущается как {data['feels_like']}°C)\n"
@@ -190,9 +197,8 @@ def format_current_message(data):
     )
     return text
 
-def generate_weather_graph(data):
-    """Генерирует график температуры и осадков"""
-    if not MATPLOTLIB_AVAILABLE:
+def generate_weather_chart(data):
+    if not MATPLOTLIB_AVAILABLE or not data or not data.get('forecast'):
         return None
     
     try:
@@ -202,47 +208,44 @@ def generate_weather_graph(data):
         probs = [item['prob'] for item in forecast]
         
         # Парсинг времени для оси X
-        dates = [datetime.fromisoformat(t) for t in times]
+        dates = [datetime.fromisoformat(t.replace('Z', '+00:00')) for t in times]
         
         fig, ax1 = plt.subplots(figsize=(10, 6))
         
-        # График температуры (линия)
-        color = 'tab:red'
+        # График температуры
+        color_temp = 'tab:red'
         ax1.set_xlabel('Время')
-        ax1.set_ylabel('Температура (°C)', color=color)
-        ax1.plot(dates, temps, color=color, marker='o', label='Температура')
-        ax1.tick_params(axis='y', labelcolor=color)
+        ax1.set_ylabel('Температура (°C)', color=color_temp)
+        ax1.plot(dates, temps, color=color_temp, marker='o', label='Температура')
+        ax1.tick_params(axis='y', labelcolor=color_temp)
         ax1.grid(True, linestyle='--', alpha=0.7)
         
-        # График вероятности осадков (столбцы на второй оси)
+        # График осадков (столбчатая диаграмма на второй оси)
         ax2 = ax1.twinx()
-        color = 'tab:blue'
-        ax2.set_ylabel('Вероятность осадков (%)', color=color)
-        ax2.bar(dates, probs, color=color, alpha=0.3, width=0.03, label='Осадки %')
-        ax2.tick_params(axis='y', labelcolor=color)
-        ax2.set_ylim(0, 100)
+        color_rain = 'tab:blue'
+        ax2.set_ylabel('Вероятность осадков (%)', color=color_rain)
+        ax2.bar(dates, probs, color=color_rain, alpha=0.3, width=0.03, label='Вероятность %')
+        ax2.tick_params(axis='y', labelcolor=color_rain)
         
-        # Форматирование оси времени
+        # Форматирование даты
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        ax1.xaxis.set_major_locator(mdates.HourLocator(interval=3))
-        plt.xticks(rotation=45)
+        fig.autofmt_xdate()
         
-        # Заголовок
-        plt.title(f"Прогноз погоды: {data['city']} (24 часа)", fontsize=14, fontweight='bold')
+        plt.title(f"Прогноз погоды: {data['city']} (24 часа)")
+        fig.tight_layout()
         
         # Сохранение в буфер
         buf = io.BytesIO()
-        plt.tight_layout()
         plt.savefig(buf, format='png', dpi=100)
         buf.seek(0)
         plt.close(fig)
-        
         return buf
+        
     except Exception as e:
-        print(f"Error generating graph: {e}")
+        print(f"Error generating chart: {e}")
         return None
 
-# --- БАЗА ПОЛЬЗОВАТЕЛЕЙ ---
+# --- РАБОТА С ПОЛЬЗОВАТЕЛЯМИ ---
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -259,10 +262,10 @@ def save_user(user_id, city):
     try:
         with open(USERS_FILE, 'w', encoding='utf-8') as f:
             json.dump(users, f, ensure_ascii=False, indent=2)
-    except:
-        pass
+    except Exception as e:
+        print(f"Error saving user: {e}")
 
-# --- ОБРАБОТЧИКИ БОТА ---
+# --- ОБРАБОТЧИКИ ---
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -271,7 +274,7 @@ def send_welcome(message):
         markup.add(city)
     bot.send_message(message.chat.id,
         "👋 Привет! Я бот погоды на базе <b>Open-Meteo</b>.\n\n"
-        "Выберите город для прогноза с графиками!",
+        "Выберите город для получения прогноза с графиком!",
         reply_markup=markup, parse_mode='HTML')
 
 @bot.message_handler(func=lambda message: message.text in CITIES)
@@ -285,31 +288,13 @@ def handle_city(message):
     if data:
         text = format_current_message(data)
         markup = types.InlineKeyboardMarkup()
-        btn_forecast = types.InlineKeyboardButton("📝 Список на 24ч", callback_data=f"list_{city}")
-        btn_graph = types.InlineKeyboardButton("📊 График погоды", callback_data=f"graph_{city}")
+        btn_graph = types.InlineKeyboardButton("📊 График на 24ч", callback_data=f"graph_{city}")
         btn_refresh = types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{city}")
-        markup.add(btn_forecast, btn_graph)
-        markup.add(btn_refresh)
+        markup.add(btn_graph, btn_refresh)
         
         bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
     else:
         bot.send_message(message.chat.id, "❌ Ошибка получения данных.")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('list_'))
-def handle_list_callback(call):
-    city = call.data.split('_')[1]
-    data = get_city_weather_data(city)
-    if data:
-        lines = [f"🕒 <b>Прогноз по часам ({city})</b>\n"]
-        for item in data['forecast']:
-            emoji = get_weather_emoji(item['code'])
-            line = f"⏰ <b>{item['time']}</b>: {item['temp']}°C {emoji}"
-            if item['prob'] > 0:
-                line += f"\n   💧 {item['prob']}%"
-            lines.append(line)
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                              text="\n".join(lines), parse_mode='HTML')
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('graph_'))
 def handle_graph_callback(call):
@@ -317,42 +302,70 @@ def handle_graph_callback(call):
     bot.answer_callback_query(call.id, "Генерирую график...")
     
     data = get_city_weather_data(city)
-    if data and MATPLOTLIB_AVAILABLE:
-        img_buf = generate_weather_graph(data)
+    if data:
+        img_buf = generate_weather_chart(data)
         if img_buf:
-            bot.send_photo(call.message.chat.id, photo=img_buf, caption=f"📊 Визуальный прогноз для {city}")
-            img_buf.close()
+            bot.send_photo(call.message.chat.id, photo=img_buf, caption=f"📈 График погоды для: {city}")
         else:
-            bot.reply_to(call.message, "❌ Не удалось создать график.")
+            bot.answer_callback_query(call.id, "Ошибка генерации графика", show_alert=True)
     else:
-        bot.reply_to(call.message, "❌ Ошибка данных или модуль графиков недоступен.")
+        bot.answer_callback_query(call.id, "Ошибка данных", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
 def handle_refresh_callback(call):
     city = call.data.split('_')[1]
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    # Эмуляция сообщения выбора города
-    msg = type('obj', (object,), {'text': city, 'chat': type('obj', (object,), {'id': call.message.chat.id})})
-    handle_city(msg)
+    bot.answer_callback_query(call.id, "Обновляю данные...")
+    
+    data = get_city_weather_data(city)
+    if data:
+        text = format_current_message(data, updated=True)
+        markup = types.InlineKeyboardMarkup()
+        btn_graph = types.InlineKeyboardButton("📊 График на 24ч", callback_data=f"graph_{city}")
+        btn_refresh = types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{city}")
+        markup.add(btn_graph, btn_refresh)
+        
+        # ИСПРАВЛЕНИЕ: Используем edit_message_text вместо delete + send
+        try:
+            bot.edit_message_text(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=markup
+            )
+        except Exception as e:
+            # Если редактирование невозможно (сообщение слишком старое или изменено пользователем),
+            # просто отправляем новое сообщение ниже, не удаляя старое.
+            bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+    else:
+        bot.answer_callback_query(call.id, "Ошибка обновления", show_alert=True)
 
 # --- РАССЫЛКА ---
 
 def run_morning_broadcast():
-    print("🚀 Запуск рассылки...")
+    print("🚀 Запуск утренней рассылки...")
     users = load_users()
+    if not users:
+        print("Нет пользователей.")
+        return
+
     for user_id_str, city in users.items():
+        user_id = int(user_id_str)
         data = get_city_weather_data(city)
         if data:
-            text = f"☀️ <b>Доброе утро!</b>\n{format_current_message(data)}"
+            header = f"☀️ <b>Доброе утро!</b>\nПогода в {city}:\n\n"
+            text = header + format_current_message(data)
             try:
-                bot.send_message(int(user_id_str), text, parse_mode='HTML')
-            except:
-                pass
-    print("✅ Готово.")
+                bot.send_message(user_id, text, parse_mode='HTML')
+            except Exception as e:
+                print(f"Ошибка отправки {user_id}: {e}")
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--send-morning':
         run_morning_broadcast()
     else:
         print("🤖 Запуск бота...")
-        bot.infinity_polling()
+        try:
+            bot.infinity_polling()
+        except Exception as e:
+            print(f"Critical error: {e}")
