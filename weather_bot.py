@@ -2,9 +2,9 @@ import os
 import sys
 import json
 import requests
+import telebot
 from datetime import datetime, timezone, timedelta
 from math import radians, sin, cos, sqrt, atan2
-import telebot
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -267,7 +267,7 @@ def handle_city(message):
     bot.send_chat_action(message.chat.id, 'typing')
     data = get_city_weather_data(city)
     
-    if data:
+    if 
         text = format_current_message(data)
         markup = telebot.types.InlineKeyboardMarkup()
         btn_forecast = telebot.types.InlineKeyboardButton("🕒 Прогноз на 24ч", callback_data=f"forecast_{city}")
@@ -285,7 +285,7 @@ def handle_forecast_callback(call):
     bot.answer_callback_query(call.id)
     
     data = get_city_weather_data(city)
-    if data:
+    if 
         text = format_forecast_message(data)
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, parse_mode='HTML')
     else:
@@ -311,7 +311,7 @@ def run_morning_broadcast():
         user_id = int(user_id_str)
         data = get_city_weather_data(city)
         
-        if data:
+        if 
             # Для утра добавим приветствие
             header = f"☀️ <b>Доброе утро!</b>\nПогода в {city}:\n\n"
             text = header + format_current_message(data)
