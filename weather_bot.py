@@ -11,103 +11,178 @@ WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
 USERS_FILE = 'users.json'
 
 if not BOT_TOKEN or not WEATHER_API_KEY:
-    print("ERROR: Missing env variables.")
+    print("❌ ОШИБКА: Не найдены переменные окружения TELEGRAM_BOT_TOKEN или WEATHER_API_KEY")
     sys.exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN, none_mode=True) # none_mode для скорости в скриптах
+# Инициализация бота без лишних параметров
+bot = telebot.TeleBot(BOT_TOKEN)
 
 CITIES = {
-    "Москва": (55.75, 37.61), "Санкт-Петербург": (59.93, 30.33),
-    "Казань": (55.79, 49.11), "Новосибирск": (55.00, 82.93),
-    "Екатеринбург": (56.84, 60.61), "Нижний Новгород": (56.32, 44.00),
-    "Сочи": (43.60, 39.73), "Владивосток": (43.11, 131.88)
+    "Москва": {"lat": 55.75, "lon": 37.61},
+    "Санкт-Петербург": {"lat": 59.93, "lon": 30.33},
+    "Казань": {"lat": 55.79, "lon": 49.11},
+    "Новосибирск": {"lat": 55.00, "lon": 82.93},
+    "Екатеринбург": {"lat": 56.84, "lon": 60.61},
+    "Нижний Новгород": {"lat": 56.32, "lon": 44.00},
+    "Сочи": {"lat": 43.60, "lon": 39.73},
+    "Владивосток": {"lat": 43.11, "lon": 131.88}
 }
 
-ICONS = {
-    "01d": "☀️", "01n": "🌙", "02d": "⛅", "02n": "☁️", "03d": "☁️", "03n": "☁️",
-    "04d": "☁️", "04n": "☁️", "09d": "🌧️", "09n": "🌧️", "10d": "🌦️", "10n": "🌧️",
-    "11d": "⛈️", "11n": "⛈️", "13d": "❄️", "13n": "❄️", "50d": "🌫️", "50n": "🌫️"
-}
+# --- ФУНКЦИИ ПОГОДЫ ---
 
-def load_users():
-    if not os.path.exists(USERS_FILE): return {}
-    try:
-        with open(USERS_FILE, 'r', encoding='utf-8') as f: return json.load(f)
-    except: return {}
-
-def save_user(uid, city):
-    users = load_users()
-    users[str(uid)] = city
-    with open(USERS_FILE, 'w', encoding='utf-8') as f: json.dump(users, f, ensure_ascii=False)
+def get_weather_icon_code(icon_name):
+    icons = {
+        "01d": "☀️", "01n": "🌙", "02d": "⛅", "02n": "☁️",
+        "03d": "☁️", "03n": "☁️", "04d": "☁️", "04n": "☁️",
+        "09d": "🌧️", "09n": "🌧️", "10d": "🌦️", "10n": "🌧️",
+        "11d": "⛈️", "11n": "⛈️", "13d": "❄️", "13n": "❄️",
+        "50d": "🌫️", "50n": "🌫️"
+    }
+    return icons.get(icon_name, "🌡️")
 
 def get_moon_phase():
-    known_new = datetime(2001, 1, 1, 12, 24, tzinfo=timezone.utc)
-    cycle = 29.53058867
-    age = ((datetime.now(timezone.utc) - known_new).total_seconds() / 86400) % cycle
+    known_new_moon = datetime(2001, 1, 1, 12, 24, 0, tzinfo=timezone.utc)
+    synodic_month = 29.53058867
+    now = datetime.now(timezone.utc)
+    diff_days = (now - known_new_moon).total_seconds() / 86400
+    cycles = diff_days / synodic_month
+    current_cycle_pos = cycles - int(cycles)
+    age = current_cycle_pos * synodic_month
+    
     if age < 1: return "🌑 Новолуние"
-    if age < 7: return "🌒 Растущая"
-    if age < 8: return "🌓 Первая четверть"
-    if age < 14: return "🌔 Растущая"
-    if age < 15: return "🌕 Полнолуние"
-    if age < 21: return "🌖 Убывающая"
-    if age < 22: return "🌗 Последняя четверть"
-    return "🌘 Убывающая"
+    elif age < 7: return "🌒 Растущая"
+    elif age < 8: return "🌓 Первая четверть"
+    elif age < 14: return "🌔 Растущая"
+    elif age < 15: return "🌕 Полнолуние"
+    elif age < 21: return "🌖 Убывающая"
+    elif age < 22: return "🌗 Последняя четверть"
+    else: return "🌘 Убывающая"
 
-def get_weather(city):
-    if city not in CITIES: return None
-    lat, lon = CITIES[city]
-    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+def format_time(timestamp, tz_offset):
+    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    local_dt = dt + timedelta(seconds=tz_offset)
+    return local_dt.strftime("%H:%M")
+
+def get_city_weather(city_name):
+    if city_name not in CITIES:
+        return None
+    coords = CITIES[city_name]
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={coords['lat']}&lon={coords['lon']}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+    
     try:
-        r = requests.get(url, timeout=5)
-        if r.status_code != 200: return None
-        d = r.json()
-        m = d['main']; w = d['wind']; s = d['sys']; wc = d['weather'][0]
-        tz = d['timezone']
-        sunrise = datetime.fromtimestamp(s['sunrise'], tz=timezone.utc) + timedelta(seconds=tz)
-        sunset = datetime.fromtimestamp(s['sunset'], tz=timezone.utc) + timedelta(seconds=tz)
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
         
-        return (f"☀️ <b>Доброе утро! {city}</b>\n\n"
-                f"{ICONS.get(wc['icon'], '🌡️')} <b>{wc['description'].capitalize()}</b>\n"
-                f"🌡️ {m['temp']}°C (ощ. {m['feels_like']}°C)\n💨 {w['speed']} м/с\n💧 {m['humidity']}%\n"
-                f"📉 {round(m['pressure']*0.75006)} мм рт. ст.\n\n"
-                f"🌅 Восход: {sunrise.strftime('%H:%M')} | 🌇 Закат: {sunset.strftime('%H:%M')}\n"
-                f"🌙 {get_moon_phase()}")
+        temp = data['main']['temp']
+        feels_like = data['main']['feels_like']
+        pressure_hpa = data['main']['pressure']
+        pressure_mm = round(pressure_hpa * 0.75006)
+        humidity = data['main']['humidity']
+        wind_speed = data['wind']['speed']
+        desc = data['weather'][0]['description']
+        icon = data['weather'][0]['icon']
+        emoji = get_weather_icon_code(icon)
+        
+        sunrise_ts = data['sys']['sunrise']
+        sunset_ts = data['sys']['sunset']
+        timezone_offset = data['timezone']
+        
+        text = (
+            f"☀️ <b>Доброе утро! Погода в {city_name}</b>\n\n"
+            f"{emoji} <b>{desc.capitalize()}</b>\n"
+            f"🌡️ {temp}°C (ощущается как {feels_like}°C)\n"
+            f"💨 Ветер: {wind_speed} м/с\n"
+            f"💧 Влажность: {humidity}%\n"
+            f"📉 Давление: {pressure_mm} мм рт. ст.\n\n"
+            f"🌅 Восход: {format_time(sunrise_ts, timezone_offset)}\n"
+            f"🌇 Закат: {format_time(sunset_ts, timezone_offset)}\n"
+            f"🌙 {get_moon_phase()}"
+        )
+        return text
     except Exception as e:
-        print(f"Error {city}: {e}")
+        print(f"Error fetching weather for {city_name}: {e}")
         return None
 
-def broadcast():
-    print("Starting broadcast...")
+# --- РАБОТА С БАЗОЙ ПОЛЬЗОВАТЕЛЕЙ ---
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return {}
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading users: {e}")
+        return {}
+
+def save_user(user_id, city):
     users = load_users()
-    if not users: print("No users."); return
-    ok = 0
-    for uid_str, city in users.items():
-        text = get_weather(city)
+    users[str(user_id)] = city
+    try:
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(users, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving user: {e}")
+
+# --- ЛОГИКА БОТА ---
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for city in CITIES.keys():
+        markup.add(city)
+    bot.send_message(message.chat.id, 
+        "👋 Привет! Выберите город, чтобы я мог присылать вам утренний прогноз.\n"
+        "Также я сохраню ваш выбор для автоматической рассылки в 7:30.", 
+        reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.text in CITIES)
+def handle_city(message):
+    city = message.text
+    save_user(message.chat.id, city)
+    weather_text = get_city_weather(city)
+    if weather_text:
+        bot.send_message(message.chat.id, weather_text, parse_mode='HTML')
+        bot.send_message(message.chat.id, "✅ Город сохранен! Теперь вы будете получать прогноз каждое утро в 7:30.")
+    else:
+        bot.send_message(message.chat.id, "Ошибка получения погоды, но город сохранен.")
+
+# --- РЕЖИМ РАССЫЛКИ (GITHUB ACTIONS) ---
+
+def run_morning_broadcast():
+    print("🚀 Запуск утренней рассылки...")
+    users = load_users()
+    if not users:
+        print("⚠️ Нет пользователей для рассылки.")
+        return
+
+    success_count = 0
+    for user_id_str, city in users.items():
+        user_id = int(user_id_str)
+        text = get_city_weather(city)
         if text:
             try:
-                bot.send_message(int(uid_str), text, parse_mode='HTML')
-                ok += 1
-                print(f"Sent to {uid_str}")
-            except Exception as e: print(f"Fail {uid_str}: {e}")
-    print(f"Done: {ok}/{len(users)}")
-
-# Handlers для интерактивного режима (если запустить локально)
-@bot.message_handler(commands=['start'])
-def cmd_start(m):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    for c in CITIES: kb.add(c)
-    bot.send_message(m.chat.id, "Выберите город для утренней рассылки:", reply_markup=kb)
-
-@bot.message_handler(func=lambda m: m.text in CITIES)
-def cmd_city(m):
-    save_user(m.chat.id, m.text)
-    txt = get_weather(m.text)
-    bot.send_message(m.chat.id, txt or "Ошибка погоды.", parse_mode='HTML')
-    bot.send_message(m.chat.id, "✅ Город сохранен! Рассылка в 7:30.")
+                bot.send_message(user_id, text, parse_mode='HTML')
+                success_count += 1
+                print(f"✅ Отправлено пользователю {user_id} ({city})")
+            except Exception as e:
+                print(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+        else:
+            print(f"⚠️ Не удалось получить погоду для {city}")
+    
+    print(f"🏁 Рассылка завершена. Успешно: {success_count}/{len(users)}")
 
 if __name__ == '__main__':
+    # Импорт нужен только здесь, чтобы не ломать скрипт рассылки, если телебот не нужен для кнопок в_actions
+    from telebot import types 
+    
     if len(sys.argv) > 1 and sys.argv[1] == '--send-morning':
-        broadcast()
+        run_morning_broadcast()
     else:
-        print("Bot running in polling mode...")
-        bot.infinity_polling()
+        print("🤖 Запуск бота в режиме ожидания команд...")
+        try:
+            bot.infinity_polling()
+        except Exception as e:
+            print(f"Critical bot error: {e}")
