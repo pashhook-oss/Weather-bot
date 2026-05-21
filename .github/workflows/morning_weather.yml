@@ -1,5 +1,0 @@
-      - name: Run morning broadcast
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          # WEATHER_API_KEY удален
-        run: python weather_bot.py --send-morning
