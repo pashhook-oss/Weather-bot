@@ -2,16 +2,12 @@ name: Keep Render Alive
 
 on:
   schedule:
-    # Запуск каждые 10 минут (синтаксис cron: минута час день месяц день_недели)
-    - cron: '*/10 * * * *'
-  
-  # Возможность ручного запуска для проверки
+    - cron: '*/10 * * * *' # Каждые 10 минут
   workflow_dispatch:
 
 jobs:
-  ping-render:
+  ping:
     runs-on: ubuntu-latest
-    
     steps:
       - name: https://weather-bot-g3ku.onrender.com
         run: |
