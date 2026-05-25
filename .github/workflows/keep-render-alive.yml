@@ -2,14 +2,18 @@ name: Keep Render Alive
 
 on:
   schedule:
-    - cron: '*/10 * * * *'  # каждые 5 минут (UTC)
-  workflow_dispatch:       # + ручной запуск по кнопке
+    # Запуск каждые 10 минут (синтаксис cron: минута час день месяц день_недели)
+    - cron: '*/10 * * * *'
+  
+  # Возможность ручного запуска для проверки
+  workflow_dispatch:
 
 jobs:
-  ping:
+  ping-render:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Ping Render Bot
+      - name: https://weather-bot-g3ku.onrender.com
         run: |
-          curl -f https://dashboard.render.com/web/srv-d826jabtqb8s73caiqog\
-          || echo "⚠️ Ping failed at $(date)
+          # Заменяем ВАШ_URL_RENDER на адрес вашего приложения (например, https://my-weather-bot.onrender.com)
+          curl -f https://ВАШ_URL_RENDER.onrender.com || echo "Site is sleeping or down, but ping sent."
