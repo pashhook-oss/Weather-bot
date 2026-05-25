@@ -2,18 +2,25 @@ import os
 import sys
 import json
 import requests
+import threading
 from datetime import datetime, timezone, timedelta
+from math import radians, sin, cos, sqrt, atan2
 import telebot
+from flask import Flask, request, jsonify
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 USERS_FILE = 'users.json'
+PORT = int(os.environ.get('PORT', 5000)) # Render назначает порт динамически
 
 if not BOT_TOKEN:
     print("❌ ОШИБКА: Не найдена переменная окружения TELEGRAM_BOT_TOKEN")
     sys.exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False) # threaded=False для работы с Flask в одном потоке
+
+# Инициализация Flask для пинга
+app = Flask(__name__)
 
 CITIES = {
     "Москва": {"lat": 55.75, "lon": 37.61},
@@ -44,11 +51,11 @@ def get_weather_description(code):
     descriptions = {
         0: "Ясно", 1: "Преимущественно ясно", 2: "Переменная облачность", 3: "Пасмурно",
         45: "Туман", 48: "Иней",
-        51: "Морось", 53: "Морось", 55: "Плотная морось",
-        61: "Дождь", 63: "Дождь", 65: "Сильный дождь",
-        71: "Снег", 73: "Снег", 75: "Сильный снег",
-        80: "Ливень", 81: "Ливень", 82: "Сильный ливень",
-        95: "Гроза", 96: "Гроза с градом", 99: "Сильная гроза"
+        51: "Легкая морось", 53: "Морось", 55: "Плотная морось",
+        61: "Слабый дождь", 63: "Дождь", 65: "Сильный дождь",
+        71: "Слабый снег", 73: "Снег", 75: "Сильный снег",
+        80: "Слабый ливень", 81: "Ливень", 82: "Сильный ливень",
+        95: "Гроза", 96: "Гроза с градом", 99: "Сильная гроза с градом"
     }
     return descriptions.get(code, "Неизвестно")
 
@@ -70,20 +77,16 @@ def get_moon_phase():
     elif age < 22: return "🌗 Последняя четверть"
     else: return "🌘 Убывающая"
 
-# --- ЛОГИКА ПОГОДЫ (OPEN-METEO) ---
+# --- ПОГОДА (OPEN-METEO) ---
 
 def get_city_weather_data(city_name):
     if city_name not in CITIES:
         return None
     
     coords = CITIES[city_name]
-    lat = coords['lat']
-    lon = coords['lon']
-    
-    # Запрос: текущая погода + почасовой прогноз на 7 дней (для выборки утро/день/вечер)
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
-        f"latitude={lat}&longitude={lon}"
+        f"latitude={coords['lat']}&longitude={coords['lon']}"
         f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,"
         f"surface_pressure,wind_speed_10m,visibility,cloud_cover"
         f"&hourly=temperature_2m,relative_humidity_2m,surface_pressure,weather_code"
@@ -97,157 +100,113 @@ def get_city_weather_data(city_name):
         
         data = resp.json()
         curr = data.get('current', {})
-        hourly = data.get('hourly', {})
         
         # Текущие данные
-        current_temp = curr.get('temperature_2m')
-        feels_like = curr.get('apparent_temperature')
-        humidity = curr.get('relative_humidity_2m')
-        pressure_hpa = curr.get('surface_pressure')
-        pressure_mm = round(pressure_hpa * 0.75006) if pressure_hpa else 0
-        wind_speed = curr.get('wind_speed_10m')
-        visibility_m = curr.get('visibility')
-        visibility_km = round(visibility_m / 1000) if visibility_m else "N/A"
-        cloud_cover = curr.get('cloud_cover')
-        weather_code = curr.get('weather_code', 0)
-        
-        # Прогноз на 7 дней (Утро, День, Вечер)
-        time_list = hourly.get('time', [])
-        temp_list = hourly.get('temperature_2m', [])
-        hum_list = hourly.get('relative_humidity_2m', [])
-        pres_list = hourly.get('surface_pressure', [])
-        code_list = hourly.get('weather_code', [])
-        
-        forecast_week = []
-        
-        # Группируем по дням. Берем 7 полных дней начиная с завтра (или сегодня, если еще рано)
-        # Для простоты берем срез данных на 7 дней вперед от текущего момента
-        # Нам нужны часы: 06:00 (Утро), 12:00 (День), 18:00 (Вечер)
-        
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-        
-        days_processed = 0
-        current_date_str = ""
-        
-        day_data = {}
-        
-        for i, t_str in enumerate(time_list):
-            # t_str формат: "2023-10-27T06:00"
-            date_part = t_str.split('T')[0]
-            time_part = t_str.split('T')[1] # "06:00"
-            
-            # Пропускаем прошедшее время сегодня
-            if date_part == today_str:
-                hour_now = int(time_part.split(':')[0])
-                if hour_now < 6: continue # Если сейчас ночь, утро еще впереди, но если уже вечер, то утро прошло
-            
-            # Начинаем сборку дней
-            if date_part != current_date_str:
-                if current_date_str and len(day_data) == 3:
-                    forecast_week.append(day_data)
-                    days_processed += 1
-                
-                if days_processed >= 7:
-                    break
-                    
-                current_date_str = date_part
-                day_data = {}
-            
-            hour = int(time_part.split(':')[0])
-            
-            # Собираем слоты
-            if hour == 6 and 'morning' not in day_data:
-                day_data['morning'] = {
-                    'temp': temp_list[i], 'hum': hum_list[i], 
-                    'pres': round(pres_list[i] * 0.75006) if pres_list[i] else 0,
-                    'code': code_list[i]
-                }
-            elif hour == 12 and 'day' not in day_data:
-                day_data['day'] = {
-                    'temp': temp_list[i], 'hum': hum_list[i], 
-                    'pres': round(pres_list[i] * 0.75006) if pres_list[i] else 0,
-                    'code': code_list[i]
-                }
-            elif hour == 18 and 'evening' not in day_data:
-                day_data['evening'] = {
-                    'temp': temp_list[i], 'hum': hum_list[i], 
-                    'pres': round(pres_list[i] * 0.75006) if pres_list[i] else 0,
-                    'code': code_list[i]
-                }
-        
-        # Добавляем последний день, если он заполнен
-        if len(day_data) == 3:
-            forecast_week.append(day_data)
-            
-        # Формируем даты для заголовков дней
-        dates = []
-        for i in range(len(forecast_week)):
-            d = now + timedelta(days=i+1)
-            dates.append(d.strftime("%d.%m (%a)")) # "27.10 (Пт)"
-            
-        return {
+        result = {
             "city": city_name,
             "coords": f"{coords['lat']}, {coords['lon']}",
             "tz": data.get('timezone_abbreviation', 'UTC'),
-            "temp": current_temp,
-            "feels_like": feels_like,
-            "desc": get_weather_description(weather_code),
-            "emoji": get_weather_emoji(weather_code),
-            "humidity": humidity,
-            "pressure_mm": pressure_mm,
-            "wind": wind_speed,
-            "visibility_km": visibility_km,
-            "clouds": cloud_cover,
-            "forecast_week": forecast_week,
-            "dates": dates
+            "temp": curr.get('temperature_2m'),
+            "feels_like": curr.get('apparent_temperature'),
+            "humidity": curr.get('relative_humidity_2m'),
+            "pressure_mm": round(curr.get('surface_pressure', 0) * 0.75006),
+            "wind": curr.get('wind_speed_10m'),
+            "visibility_km": round(curr.get('visibility', 0) / 1000),
+            "clouds": curr.get('cloud_cover'),
+            "desc": get_weather_description(curr.get('weather_code', 0)),
+            "emoji": get_weather_emoji(curr.get('weather_code', 0))
         }
+        
+        # Недельный прогноз (группировка по Утро/День/Вечер)
+        hourly = data.get('hourly', {})
+        times = hourly.get('time', [])
+        temps = hourly.get('temperature_2m', [])
+        hums = hourly.get('relative_humidity', [])
+        press = hourly.get('surface_pressure', [])
+        codes = hourly.get('weather_code', [])
+        
+        weekly_forecast = []
+        now = datetime.now(timezone.utc)
+        
+        # Пропускаем прошедшие часы сегодня
+        start_idx = 0
+        current_hour_str = now.strftime("%Y-%m-%dT%H")
+        for i, t in enumerate(times):
+            if t.startswith(current_hour_str):
+                start_idx = i
+                break
+        
+        # Группируем по дням (следующие 7 дней)
+        days_processed = {}
+        count = 0
+        
+        for i in range(start_idx, len(times)):
+            if count >= 7 * 3: # 7 дней * 3 слота (утро, день, вечер)
+                break
+                
+            dt_str = times[i] # 2023-10-25T06:00
+            dt_obj = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+            day_key = dt_obj.strftime("%Y-%m-%d")
+            hour = dt_obj.hour
+            
+            # Определяем слот: Утро (6-11), День (12-17), Вечер (18-23)
+            slot_name = ""
+            if 6 <= hour <= 11: slot_name = "Утро"
+            elif 12 <= hour <= 17: slot_name = "День"
+            elif 18 <= hour <= 23: slot_name = "Вечер"
+            else: continue # Ночь пропускаем или относим к следующему утру
+            
+            slot_key = f"{day_key}_{slot_name}"
+            
+            if slot_key not in days_processed:
+                days_processed[slot_key] = {
+                    "date": dt_obj.strftime("%d.%m"),
+                    "slot": slot_name,
+                    "temp": temps[i],
+                    "humidity": hums[i],
+                    "pressure": round(press[i] * 0.75006),
+                    "code": codes[i],
+                    "emoji": get_weather_emoji(codes[i])
+                }
+                count += 1
+        
+        # Сортируем по дате и времени слота
+        sorted_slots = sorted(days_processed.values(), key=lambda x: (x['date'].split('.')[2]+x['date'].split('.')[1]+x['date'].split('.')[0], ["Утро", "День", "Вечер"].index(x['slot'])))
+        result['weekly'] = sorted_slots
+        
+        return result
         
     except Exception as e:
         print(f"Error: {e}")
         return None
 
-def format_weekly_forecast(data):
-    """Формирует аккуратный текст прогноза на неделю"""
-    lines = [f"📅 <b>Прогноз на 7 дней: {data['city']}</b>\n"]
-    lines.append("─────────────────────")
-    
-    for i, day in enumerate(data['forecast_week']):
-        date_str = data['dates'][i]
-        lines.append(f"\n<b>{date_str}</b>")
-        
-        # Утро
-        m = day.get('morning', {})
-        m_emoji = get_weather_emoji(m.get('code', 0))
-        lines.append(f"🌅 Утро:  `{m.get('temp', 0):>4}`°C  {m_emoji}  💧{m.get('hum', 0)}%  📉{m.get('pres', 0)}мм")
-        
-        # День
-        d = day.get('day', {})
-        d_emoji = get_weather_emoji(d.get('code', 1), is_day=1)
-        lines.append(f"☀️ День:  `{d.get('temp', 0):>4}`°C  {d_emoji}  💧{d.get('hum', 0)}%  📉{d.get('pres', 0)}мм")
-        
-        # Вечер
-        e = day.get('evening', {})
-        e_emoji = get_weather_emoji(e.get('code', 0), is_day=0)
-        lines.append(f"🌇 Вечер: `{e.get('temp', 0):>4}`°C  {e_emoji}  💧{e.get('hum', 0)}%  📉{e.get('pres', 0)}мм")
-        
-    lines.append("─────────────────────")
-    return "\n".join(lines)
-
 def format_current_message(data):
-    text = (
+    return (
         f"📍 <b>{data['city']}</b> ({data['coords']})\n"
-        f"🕒 Часовой пояс: {data['tz']}\n\n"
+        f"🕒 TZ: {data['tz']}\n\n"
         f"{data['emoji']} <b>{data['desc']}</b>\n\n"
-        f"🌡️ Температура: <b>{data['temp']}°C</b> (ощущается {data['feels_like']}°C)\n"
-        f"💨 Ветер: {data['wind']} м/с\n"
-        f"💧 Влажность: {data['humidity']}%\n"
-        f"☁️ Облачность: {data['clouds']}%\n"
-        f"👁️ Видимость: {data['visibility_km']} км\n"
-        f"📉 Давление: <b>{data['pressure_mm']} мм рт. ст.</b>\n\n"
-        f"🌙 Луна: {get_moon_phase()}"
+        f"🌡️ {data['temp']}°C (ощ. {data['feels_like']}°C)\n"
+        f"💨 {data['wind']} м/с | 💧 {data['humidity']}%\n"
+        f"☁️ {data['clouds']}% | 👁️ {data['visibility_km']} км\n"
+        f"📉 {data['pressure_mm']} мм рт. ст.\n\n"
+        f"🌙 {get_moon_phase()}"
     )
-    return text
+
+def format_weekly_message(data):
+    lines = [f"📅 <b>Прогноз на неделю ({data['city']})</b>\n"]
+    lines.append("<i>Утро (6-11), День (12-17), Вечер (18-23)</i>\n")
+    
+    for item in data['weekly']:
+        # Форматирование с фиксированной шириной для выравнивания
+        date_str = f"{item['date']} ({item['slot'][:3]})" # 25.10 (Утр)
+        temp_str = f"{item['temp']:>4}°C" # Выравнивание вправо
+        hum_str = f"{item['humidity']:>3}%"
+        pres_str = f"{item['pressure']:>4}"
+        
+        line = f"{date_str}: {temp_str} {item['emoji']} | 💧{hum_str} | 📉{pres_str}"
+        lines.append(line)
+        
+    return "\n".join(lines)
 
 # --- БАЗА ПОЛЬЗОВАТЕЛЕЙ ---
 
@@ -263,13 +222,10 @@ def load_users():
 def save_user(user_id, city):
     users = load_users()
     users[str(user_id)] = city
-    try:
-        with open(USERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(users, f, ensure_ascii=False, indent=2)
-    except:
-        pass
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
 
-# --- БОТ ---
+# --- TELEGRAM HANDLERS ---
 
 @bot.message_handler(commands=['start', 'menu'])
 def send_welcome(message):
@@ -277,49 +233,41 @@ def send_welcome(message):
     for city in CITIES.keys():
         markup.add(city)
     
-    text = (
-        "👋 Привет! Я бот погоды (<b>Open-Meteo</b>).\n\n"
-        "Выберите город из меню ниже:\n"
-        "• Прогноз на 7 дней (Утро/День/Вечер)\n"
-        "• Точные данные: осадки, давление, влажность\n"
-        "• Автоматическая рассылка в 7:30"
-    )
-    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode='HTML')
+    text = "👋 Привет! Выберите город для прогноза.\nЯ сохраню его для утренней рассылки."
+    bot.send_message(message.chat.id, text, reply_markup=markup)
 
 @bot.message_handler(func=lambda message: message.text in CITIES)
 def handle_city(message):
     city = message.text
     save_user(message.chat.id, city)
-    
     bot.send_chat_action(message.chat.id, 'typing')
-    data = get_city_weather_data(city)
     
+    data = get_city_weather_data(city)
     if data:
         text = format_current_message(data)
         markup = telebot.types.InlineKeyboardMarkup()
-        btn_week = telebot.types.InlineKeyboardButton("📅 Прогноз на 7 дней", callback_data=f"week_{city}")
-        btn_refresh = telebot.types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{city}")
-        markup.add(btn_week, btn_refresh)
+        btn_week = telebot.types.InlineKeyboardButton("📅 Прогноз на неделю", callback_data=f"weekly_{city}")
+        btn_ref = telebot.types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{city}")
+        markup.add(btn_week, btn_ref)
         
         bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
-        # bot.send_message(message.chat.id, "✅ Город сохранен!")
+        bot.send_message(message.chat.id, "✅ Город сохранен!")
     else:
-        bot.send_message(message.chat.id, "❌ Ошибка получения данных.")
+        bot.send_message(message.chat.id, "❌ Ошибка данных.")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('week_'))
-def handle_week_callback(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith('weekly_'))
+def handle_weekly(call):
     city = call.data.split('_')[1]
     bot.answer_callback_query(call.id)
-    
     data = get_city_weather_data(city)
     if data:
-        text = format_weekly_forecast(data)
+        text = format_weekly_message(data)
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, parse_mode='HTML')
     else:
-        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="Ошибка загрузки прогноза.")
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="Ошибка загрузки.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
-def handle_refresh_callback(call):
+def handle_refresh(call):
     city = call.data.split('_')[1]
     bot.delete_message(call.message.chat.id, call.message.message_id)
     # Эмуляция сообщения для вызова handle_city
@@ -329,26 +277,44 @@ def handle_refresh_callback(call):
 # --- РАССЫЛКА ---
 
 def run_morning_broadcast():
-    print("🚀 Запуск рассылки...")
+    print("🚀 Рассылка...")
     users = load_users()
-    if not users:
-        print("Нет пользователей.")
-        return
-
-    for user_id_str, city in users.items():
+    for uid, city in users.items():
         data = get_city_weather_data(city)
         if data:
-            header = f"☀️ <b>Доброе утро!</b>\nПогода в {data['city']}:\n\n"
-            text = header + format_current_message(data)
+            txt = f"☀️ <b>Доброе утро!</b>\n{format_current_message(data)}"
             try:
-                bot.send_message(int(user_id_str), text, parse_mode='HTML')
-                print(f"✅ Отправлено {user_id_str}")
-            except Exception as e:
-                print(f"❌ Ошибка {user_id_str}: {e}")
+                bot.send_message(int(uid), txt, parse_mode='HTML')
+                print(f"Sent to {uid}")
+            except: pass
+    print("Done")
+
+# --- FLASK SERVER ( ДЛЯ ПИНГА ) ---
+
+@app.route('/')
+def home():
+    return "Weather Bot is Running! 🌤️"
+
+@app.route('/ping')
+def ping():
+    return jsonify({"status": "ok", "message": "Render is awake!"}), 200
+
+def run_flask():
+    app.run(host='0.0.0.0', port=PORT)
+
+# --- ЗАПУСК ---
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == '--send-morning':
         run_morning_broadcast()
     else:
-        print("🤖 Бот запущен...")
-        bot.infinity_polling()
+        print("🤖 Запуск бота + Flask сервера...")
+        # Запускаем Flask в отдельном потоке
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        
+        # Запускаем бота в основном потоке
+        try:
+            bot.infinity_polling()
+        except Exception as e:
+            print(f"Bot error: {e}")
