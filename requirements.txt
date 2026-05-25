@@ -2,3 +2,4 @@ pyTelegramBotAPI>=4.20.0
 requests>=2.31.0
 matplotlib>=3.7.0
 Pillow>=10.0.0
+Flask
